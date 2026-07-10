@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-Esegue tutti gli scraper e invia i dati all'app su InfinityFree.
-Uso: python run_all.py
-"""
 import sys
 import os
 import requests
@@ -27,14 +23,27 @@ def main():
     print("  SaverList Market - Scraper")
     print("=" * 50)
 
-    from gigante import GiganteScraper
-    from conad import ConadScraper
-    from esselunga import EsselungaScraper
+    from brochure_scraper import BrochureScraper
+    from conad_scraper import ConadScraper
+    from gigante_scraper import GiganteScraper
+    from esselunga_scraper import EsselungaScraper
 
-    scrapers = [ConadScraper(), GiganteScraper(), EsselungaScraper()]
+    scrapers = [
+        ("conad", ConadScraper),
+        ("gigante", GiganteScraper),
+        ("esselunga", EsselungaScraper),
+        ("conad_brochure", lambda: BrochureScraper("conad")),
+        ("gigante_brochure", lambda: BrochureScraper("gigante")),
+        ("esselunga_brochure", lambda: BrochureScraper("esselunga")),
+    ]
 
-    for s in scrapers:
-        s.run()
+    for label, cls in scrapers:
+        try:
+            s = cls() if callable(cls) else cls
+            s.run()
+        except Exception as e:
+            print(f"\n=== {label} ===")
+            print(f"  ERRORE: {e}")
 
     print("\n=== Pulizia offerte scadute ===")
     cleanup()

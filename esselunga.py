@@ -23,16 +23,15 @@ class EsselungaScraper(ScraperBase):
                 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
                 res = requests.get(url, headers=headers, timeout=20)
                 res.encoding = "utf-8"
-
                 if res.status_code != 200:
                     continue
 
                 soup = BeautifulSoup(res.text, "lxml")
 
                 selectors = [
-                    "li", ".product-item", ".offer-item", ".offerta-card",
-                    "article", ".product-card", ".item", "[class*=product]",
-                    "[class*=offerta]", "[class*=promo]", "tr", ".list-item"
+                    ".product-item", ".offer-item", ".offerta-card",
+                    ".product-card", "[class*=offerta]", "[class*=product]",
+                    "[class*=promo]", "article", ".list-item",
                 ]
                 items = []
                 for sel in selectors:
@@ -47,7 +46,7 @@ class EsselungaScraper(ScraperBase):
                             continue
 
                         name = self._extract_name(item, text)
-                        if not name or name in seen_names or len(name) < 3:
+                        if not name or name in seen_names or len(name) < 4:
                             continue
                         seen_names.add(name)
 
@@ -56,6 +55,9 @@ class EsselungaScraper(ScraperBase):
                         discount = self._extract_discount(item, text)
                         category = self._guess_category(name)
                         image = self._extract_image(item)
+
+                        if not price and not original:
+                            continue
 
                         self.add_offer(
                             product_name=name,
@@ -80,8 +82,8 @@ class EsselungaScraper(ScraperBase):
                 n = el.get_text(strip=True)
                 if len(n) > 3:
                     return n
-        lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 4]
-        return lines[0][:100] if lines else text[:80].strip()
+        lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 4 and not re.match(r'^[\d.,\s€%\-]+$', l.strip())]
+        return lines[0][:100] if lines else None
 
     def _extract_prices(self, item, text):
         prices = re.findall(r'(\d+[.,]\d{2})\s*[€]', text)
