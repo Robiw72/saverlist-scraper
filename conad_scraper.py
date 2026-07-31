@@ -1,97 +1,106 @@
 import os
+import re
+import html as html_mod
+import json
+import time
 import requests
 import config
 from datetime import datetime, timedelta
 from base import ScraperBase
 
 
-PARSE_BASE = "https://api.parse.bot/scraper/06ee45ae-1dba-4ce9-ae30-5a07b6011c0e"
+CONAD_BASE = "https://spesaonline.conad.it"
 
-SUB_CATEGORY_DEPTH = {}
+MAIN_CATEGORIES = [
+    "/c/frutta-e-verdura--01",
+    "/c/carne-e-salumi--02",
+    "/c/prodotti-ittici--03",
+    "/c/latte-latticini-e-uova--04",
+    "/c/preparati-torte-e-pizze--05",
+    "/c/dolci-per-colazione-e-merenda--06",
+    "/c/bevande-calde--07",
+    "/c/conserve-salse-condimenti--08",
+    "/c/prodotti-da-forno--09",
+    "/c/pasta-e-riso--10",
+    "/c/surgelati-e-gelati--11",
+    "/c/piatti-pronti--12",
+    "/c/bevande-e-bibite-analcoliche--18",
+]
+
+CARD_RE = re.compile(
+    r'data-product="([^"]{10,})".*?'
+    r'product-price-red product-price[^>]*>\s*([\d.,]+)\s*[€€]?',
+    re.DOTALL,
+)
 
 
 class ConadScraper(ScraperBase):
     def __init__(self):
         super().__init__("conad", "Conad")
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0"
+        }
 
     def scrape(self):
-        api_key = os.environ.get("PARSE_BOT_API_KEY") or config.PARSE_BOT_API_KEY
-        if not api_key:
-            print(f"  PARSE_BOT_API_KEY non configurata in config.py")
-            return
-
-        self.headers = {"X-API-Key": api_key, "User-Agent": "SaverList-Scraper/1.0"}
-
-        categories = self._get_categories()
-        if not categories:
-            print(f"  Nessuna categoria trovata")
-            return
-
-        main_cats = [c for c in categories if self._is_main_category(c)][:8]
-
         total = 0
-        for cat in main_cats:
+        for i, cat in enumerate(MAIN_CATEGORIES):
+            if i > 0:
+                time.sleep(1.5)
             offers = self._scrape_category(cat)
             for o in offers:
                 self.add_offer(**o)
             total += len(offers)
+            print(f"    {cat}: {len(offers)} offerte")
 
         print(f"  Totale offerte trovate: {total}")
 
-    def _get_categories(self):
-        try:
-            res = requests.get(f"{PARSE_BASE}/get_categories", headers=self.headers, timeout=20)
-            data = res.json()
-            d = data.get("data") or {}
-            return d.get("categories") or []
-        except Exception as e:
-            print(f"  Errore categorie: {e}")
-            return []
-
-    def _is_main_category(self, cat):
-        slug = cat.get("slug", "")
-        if not slug:
-            return False
-        depth = slug.count("-")
-        return depth <= 3
-
-    def _scrape_category(self, cat):
-        slug = cat.get("slug", "")
-        if not slug:
-            return []
-
+    def _scrape_category(self, cat_path):
         offers = []
-        try:
-            for page in range(2):
-                res = requests.get(
-                    f"{PARSE_BASE}/get_products_by_category",
-                    params={"category_slug": slug, "page": page},
-                    headers=self.headers, timeout=20
-                )
-                if res.status_code != 200:
+        url = CONAD_BASE + cat_path
+        res = None
+        for attempt in range(2):
+            try:
+                res = requests.get(url, headers=self.headers, timeout=30)
+                res.encoding = 'utf-8'
+                if res.status_code == 200 and 'data-product' in res.text:
                     break
-                data = res.json()
-                d = data.get("data") or data
-                products = d.get("products") or []
-                if not products:
-                    break
+            except Exception:
+                pass
+            if attempt == 0:
+                time.sleep(5)
+        if res is None or res.status_code != 200 or 'data-product' not in res.text:
+            return []
 
-                for p in products:
-                    name = (p.get("name") or "").strip()
-                    price = p.get("base_price") or 0
-                    try:
-                        price = float(price)
-                    except (ValueError, TypeError):
-                        continue
-                    if price <= 0:
-                        continue
-                    offers.append({
-                        "product_name": name[:200],
-                        "offer_price": price,
-                        "promo_end_date": (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"),
-                        "category": "Alimentari",
-                    })
-        except Exception as e:
-            print(f"    Errore categoria {slug}: {e}")
+        for m in CARD_RE.finditer(res.text):
+            try:
+                data = json.loads(html_mod.unescape(m.group(1)))
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            name = (data.get("nome") or "").strip()
+            if not name:
+                continue
+
+            price = self._parse_price(m.group(2))
+            if not price or price < 0.10 or price > 999:
+                continue
+
+            offers.append({
+                "product_name": name[:200],
+                "offer_price": price,
+                "image_url": data.get("defaultImgSrc") or None,
+                "category": data.get("categoriaPrimoLivello") or "Alimentari",
+                "promo_end_date": (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"),
+            })
 
         return offers
+
+    def _parse_price(self, s):
+        s = s.strip().replace("\u20ac", "").replace(" ", "")
+        m = re.match(r"^(\d+[.,]\d{1,2})$", s)
+        if not m:
+            return None
+        try:
+            return float(m.group(1).replace(",", "."))
+        except ValueError:
+            return None

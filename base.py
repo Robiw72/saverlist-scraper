@@ -43,7 +43,7 @@ class ScraperBase:
             return False
         if PRICE_PATTERN.match(name):
             return False
-        if CATEGORY_PATTERN.match(name_lower):
+        if len(name_lower) <= 20 and CATEGORY_PATTERN.match(name_lower):
             return False
         if re.search(r'\b(voto|contatti|raccolte|confronta|buoni|anteprime|volantini|catene)\b', name_lower):
             return False
@@ -57,6 +57,9 @@ class ScraperBase:
         if not self.is_valid_product_name(name):
             return
         if not price and not kwargs.get('original_price'):
+            return
+        name_lower = name.strip().lower()
+        if any(name_lower == o.get('product_name', '').strip().lower() for o in self.offers):
             return
         self.offers.append(kwargs)
 
