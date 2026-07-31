@@ -1,110 +1,111 @@
 import re
+import requests
 from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
 from base import ScraperBase
 
-try:
-    from playwright.sync_api import sync_playwright
-    HAS_PLAYWRIGHT = True
-except ImportError:
-    HAS_PLAYWRIGHT = False
+
+VOLANTINI_URL = "https://www.esselunga.it/it-it/promozioni/volantini.html"
+GRID_URL = "https://www.esselunga.it/services/istituzionale35/digital-grid.condition:nav_menu.abbrev:ABB.page:0.rows:1000.codPromo:{cod}.json"
+STORE_ABBREV = "ABB"
+
+EXCLUDED_FLYER = re.compile(r"casa|persona|raccolta|punti|elettrodomestici|viaggi|occasione", re.I)
 
 
 class EsselungaScraper(ScraperBase):
     def __init__(self):
         super().__init__("esselunga", "Esselunga")
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+            "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+        }
 
     def scrape(self):
-        offers = []
+        flyers = self._get_active_flyers()
+        if not flyers:
+            print("  Nessun volantino trovato")
+            return
+        print(f"  Volantini attivi: {[f['name'] for f in flyers]}")
 
-        if HAS_PLAYWRIGHT:
-            pw_offers = self._scrape_playwright()
-            offers.extend(pw_offers)
+        total = 0
+        for flyer in flyers:
+            offers = self._fetch_products(flyer["codPromo"])
+            for o in offers:
+                self.add_offer(**o)
+            total += len(offers)
+            print(f"    {flyer['name']}: {len(offers)} offerte")
 
-        for o in offers:
-            self.add_offer(**o)
-        print(f"  Totale offerte trovate: {len(offers)}")
+        print(f"  Totale offerte trovate: {total}")
 
-    def _scrape_playwright(self):
-        offers = []
-        urls = [
-            "https://www.esselunga.it/promozioni",
-        ]
-
+    def _get_active_flyers(self):
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.set_default_timeout(30000)
-
-                for url in urls:
-                    try:
-                        page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                        page.wait_for_timeout(3000)
-                        content = page.content()
-                        soup = BeautifulSoup(content, "lxml")
-                        items = self._parse_html(soup)
-                        offers.extend(items)
-                    except Exception as e:
-                        print(f"    Errore {url}: {e}")
-                        continue
-
-                browser.close()
+            res = requests.get(VOLANTINI_URL, headers=self.headers, timeout=30)
+            if res.status_code != 200:
+                return []
         except Exception as e:
-            print(f"  ERRORE Playwright: {e}")
+            print(f"    Errore lista volantini: {e}")
+            return []
 
-        return offers
-
-    def _parse_html(self, soup):
-        offers = []
-        text_blocks = soup.find_all(["div", "article", "section"],
-                                    class_=re.compile(r"(product|offer|promo|card|item)", re.I))
-
-        if not text_blocks:
-            text_blocks = soup.find_all(["div", "li", "article"],
-                                        attrs={"data-product": True})
-
-        if not text_blocks:
-            text_blocks = soup.find_all("div", class_=True)
-
+        flyers = []
         seen = set()
-        for block in text_blocks:
-            text = block.get_text(strip=True)
-            if not text or len(text) < 10:
+        for a in re.finditer(r'<a[^>]*flyer-btn[^>]*data-type="scopri"[^>]*>', res.text):
+            tag = a.group(0)
+            mid = re.search(r'data-id="([^"]+)"', tag)
+            mname = re.search(r'data-name="([^"]*)"', tag)
+            if not mid:
+                continue
+            cod = mid.group(1)
+            name = (mname.group(1) if mname else cod).strip() or cod
+            if cod in seen or EXCLUDED_FLYER.search(name):
+                continue
+            seen.add(cod)
+            flyers.append({"codPromo": cod, "name": name})
+
+        return flyers
+
+    def _fetch_products(self, cod_promo):
+        url = GRID_URL.format(cod=cod_promo)
+        try:
+            res = requests.get(url, headers=self.headers, timeout=60)
+            if res.status_code != 200 or "items" not in res.text:
+                return []
+            data = res.json()
+        except Exception as e:
+            print(f"    Errore grid {cod_promo}: {e}")
+            return []
+
+        offers = []
+        for item in data.get("items", []):
+            title = (item.get("title") or "").strip()
+            if not title:
                 continue
 
-            lines = [l.strip() for l in text.split("\n") if l.strip()]
-            name = lines[0] if lines else text[:100]
-            if len(name) < 5:
+            promo = self._first(item.get("promozioni_prezzoPromo"))
+            promo_al = self._first(item.get("promozioni_prezzoPromoAl"))
+            base = item.get("prezzo") or 0
+
+            price = promo or promo_al
+            if not price or price < 0.10 or price > 999:
                 continue
 
-            price = None
-            for line in lines:
-                m = re.search(r"[€€]\s*(\d+[.,]\d{2})", line)
-                if not m:
-                    m = re.search(r"(\d+[.,]\d{2})\s*[€€]", line)
-                if m:
-                    try:
-                        p = float(m.group(1).replace(",", "."))
-                        if 0.10 < p < 999:
-                            price = p
-                            break
-                    except ValueError:
-                        continue
-
-            if not price:
-                continue
-
-            key = (name[:50].lower(), price)
-            if key in seen:
-                continue
-            seen.add(key)
+            end_date = self._first(item.get("promozioni_dataFinePromoArticolo"))
+            end_str = ""
+            if end_date:
+                end_str = str(end_date)[:10]
+            else:
+                end_str = (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d")
 
             offers.append({
-                "product_name": name[:200],
+                "product_name": title[:200],
                 "offer_price": price,
-                "promo_end_date": (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"),
+                "original_price": base if base > 0 else None,
+                "image_url": item.get("imgUrl") or None,
                 "category": "Alimentari",
+                "promo_end_date": end_str,
             })
 
         return offers
+
+    def _first(self, value):
+        if isinstance(value, list):
+            return value[0] if value else None
+        return value
